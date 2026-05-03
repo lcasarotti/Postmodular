@@ -59,6 +59,12 @@ endif
 # -----------------------------------------------------------------------------
 # Custom build flags
 
+# Accessibility HTTP server (enabled by default)
+CARDINAL_ACCESSIBLE_HTTP ?= true
+ifeq ($(CARDINAL_ACCESSIBLE_HTTP),true)
+BASE_FLAGS += -DCARDINAL_ACCESSIBLE_HTTP
+endif
+
 BASE_FLAGS += -DUSING_CARDINAL_NOT_RACK
 BASE_FLAGS += -I$(abspath $(ROOT)/include)
 BASE_FLAGS += -I$(abspath $(ROOT)/include/simd-compat)
@@ -101,6 +107,8 @@ BASE_FLAGS += -D_USE_MATH_DEFINES
 BASE_FLAGS += -DWIN32_LEAN_AND_MEAN
 BASE_FLAGS += -D_WIN32_WINNT=0x0600
 BASE_FLAGS += -I$(abspath $(ROOT)/include/mingw-compat)
+# ASIO SDK include path (for RtAudio ASIO backend)
+BASE_FLAGS += -I$(abspath $(ROOT)/src/Rack/dep/rtaudio/include)
 endif
 
 # make sure these flags always end up last

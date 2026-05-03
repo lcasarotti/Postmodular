@@ -92,10 +92,14 @@ struct Initializer
     std::string templatePath;
     std::string factoryTemplatePath;
     bool shouldSaveSettings = false;
+    bool pluginsInitialized = false;
 
     Initializer(const CardinalBasePlugin* plugin, const CardinalBaseUI* ui);
     ~Initializer();
     void loadSettings(bool isRealInstance);
+    // Lazy: loads Rack static plugins + browser DB. Safe to call multiple times.
+    // Must be called before loadTemplate(). Skipped for dummy/scan instances.
+    void ensurePluginsLoaded();
 
   #ifdef HAVE_LIBLO
     lo_server oscServer = nullptr;
@@ -108,7 +112,19 @@ struct Initializer
     void stopRemoteServer();
     void stepRemoteServer();
   #endif
+
+  #ifdef CARDINAL_ACCESSIBLE_HTTP
+    CardinalBasePlugin* httpPluginInstance = nullptr;
+    void startHttpServer();
+    void stopHttpServer();
+    void processPendingHttpRequests(const std::string& autosavePath, CardinalPluginContext* ctx);
+  #endif
 };
+
+#ifdef CARDINAL_ACCESSIBLE_HTTP
+// Called from CardinalUI::uiIdle() to safely load a pending patch on the UI thread.
+void httpProcessPendingPatchFromUI(CardinalPluginContext* ctx);
+#endif
 
 #ifndef HEADLESS
 void handleHostParameterDrag(const CardinalPluginContext* pcontext, uint index, bool started);

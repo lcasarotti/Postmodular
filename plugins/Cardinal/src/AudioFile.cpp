@@ -289,6 +289,16 @@ struct CarlaInternalPluginModule : Module, Runner {
         }
     }
 
+    bool loadFile(const std::string& key, const std::string& path) override
+    {
+        if (key != "sample" || fCarlaPluginHandle == nullptr)
+            return false;
+        currentFile = path;
+        fileChanged = true;
+        fCarlaPluginDescriptor->set_custom_data(fCarlaPluginHandle, "file", path.c_str());
+        return true;
+    }
+
     void process(const ProcessArgs&) override
     {
         if (fCarlaPluginHandle == nullptr)

@@ -627,6 +627,10 @@ public:
         }
        #endif
 
+       #ifdef CARDINAL_ACCESSIBLE_HTTP
+        httpProcessPendingPatchFromUI(context);
+       #endif
+
         if (filebrowserhandle != nullptr && fileBrowserIdle(filebrowserhandle))
         {
             {

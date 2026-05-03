@@ -696,11 +696,10 @@ Initializer::Initializer(const CardinalBasePlugin* const plugin, const CardinalB
                     "Make sure Cardinal was downloaded and installed correctly.", asset::systemDir.c_str());
     }
 
-    INFO("Initializing plugins");
-    plugin::initStaticPlugins();
-
-    INFO("Initializing plugin browser DB");
-    app::browserInit();
+    // For dummy/scan instances, defer heavy plugin loading to first real instance.
+    // This allows Reaper's plugin scan to complete fast without crashing.
+    if (isRealInstance)
+        ensurePluginsLoaded();
 
     loadSettings(isRealInstance);
 
@@ -753,6 +752,21 @@ Initializer::~Initializer()
 
     INFO("Destroying logger");
     logger::destroy();
+}
+
+void Initializer::ensurePluginsLoaded()
+{
+    using namespace rack;
+
+    if (pluginsInitialized)
+        return;
+    pluginsInitialized = true;
+
+    INFO("Initializing plugins");
+    plugin::initStaticPlugins();
+
+    INFO("Initializing plugin browser DB");
+    app::browserInit();
 }
 
 void Initializer::loadSettings(const bool isRealInstance)
@@ -1265,3 +1279,1364 @@ void async_dialog_text_input(const char* const message, const char* const text,
     asyncDialog::textInput(message, text, action);
 #endif
 }
+
+// --------------------------------------------------------------------------------------------------------------------
+// Cardinal Accessible HTTP Server
+// --------------------------------------------------------------------------------------------------------------------
+
+#ifdef CARDINAL_ACCESSIBLE_HTTP
+
+// httplib requires Windows 10+ APIs; override the global _WIN32_WINNT set by Makefile
+#ifdef _WIN32_WINNT
+# undef _WIN32_WINNT
+#endif
+#define _WIN32_WINNT 0x0A00
+
+#include "extra/httplib.h"
+
+#include "rack.hpp"
+#include "engine/Engine.hpp"
+#include "plugin.hpp"
+
+#include <thread>
+#include <atomic>
+#include <condition_variable>
+#include <chrono>
+#include <vector>
+#include <memory>
+#include <cstdlib>
+#include <cstring>
+
+START_NAMESPACE_DISTRHO
+
+// Global server and thread owned by Initializer
+static httplib::Server*  gHttpServer  = nullptr;
+static std::thread       gHttpThread;
+static std::atomic<bool> gHttpRunning{false};
+
+// Deferred patch load (HTTP thread → audio thread → UI thread)
+static std::atomic<bool>     gPendingPatchLoad{false};
+static std::string           gPendingPatchJson;   // for JSON-body load (written via audio thread)
+static std::mutex            gPendingPatchMutex;
+
+// Path-based load: HTTP thread → UI thread directly (skips audio thread)
+// gPendingPatchPath: .vcv file path; non-empty triggers ctx->patch->load(path) on UI thread
+static std::string           gPendingPatchPath;
+static std::mutex            gPendingPathMutex;
+
+// Patch load handoff: audio thread writes file, UI thread calls loadAutosave()
+static std::atomic<bool>     gPendingPatchFromUI{false};
+
+// Completion signal: HTTP thread waits here for loadAutosave() to finish.
+static std::mutex              gPatchSyncMtx;
+static std::condition_variable gPatchSyncCV;
+static bool                    gPatchSyncDone = false;
+
+// Diagnostics
+static std::atomic<uint64_t> gRunCallCount{0};
+static std::atomic<uint64_t> gFlagSetCount{0};      // incremented when flag stored true
+static std::atomic<uint64_t> gFlagDetectedCount{0}; // incremented when flag seen true in audio thread
+static std::string           gLastPatchLoadResult;
+
+// Deferred engine mutations (module/cable add/remove).
+// HTTP handlers queue an op here; processPendingHttpRequests() (audio thread,
+// between stepBlock() calls, no engine lock held) executes it and signals done.
+struct PendingEngineOp {
+    enum Type { ADD_MODULE, REMOVE_MODULE, ADD_CABLE, REMOVE_CABLE } type;
+    std::string pluginSlug, moduleSlug;           // ADD_MODULE
+    int64_t     moduleId    = -1;                 // REMOVE_MODULE
+    int64_t     outModuleId = -1, outPortId = -1; // ADD_CABLE
+    int64_t     inModuleId  = -1, inPortId  = -1; // ADD_CABLE
+    int64_t     cableId     = -1;                 // REMOVE_CABLE
+    // Result (written by audio thread)
+    int64_t     resultId    = -1;
+    std::string error;
+    bool        done        = false;
+};
+static std::mutex               gEngineOpMutex;
+static std::condition_variable  gEngineOpCV;
+static PendingEngineOp*         gPendingEngineOp = nullptr;
+
+// Serialises raw module/cable pointer access against loadAutosave().
+// HTTP handlers and loadAutosave() both hold this mutex to prevent
+// use-after-free when patch reload deletes modules while WS thread reads them.
+static std::mutex               gModuleAccessMutex;
+
+// Audio device list and active config -- populated by RtAudioBridge::open() on Windows native.
+// Remain empty/default on VST3/CLAP (where audio is managed by the host).
+extern "C" {
+char gCardinalAudioDevicesJson[32768] = "[]";
+char gCardinalAudioConfigJson[512]    = "{}";
+}
+
+// Save key=value config file to %APPDATA%\Cardinal\audio.cfg
+static bool saveAudioConfigFile(const std::string& driver, const std::string& device,
+                                uint32_t sampleRate, uint32_t bufferSize)
+{
+#ifdef _WIN32
+    const char* const appdata = std::getenv("APPDATA");
+    if (appdata == nullptr) return false;
+    const std::string dir = std::string(appdata) + "\\Cardinal";
+    rack::system::createDirectories(dir);
+    const std::string path = dir + "\\audio.cfg";
+    FILE* const f = fopen(path.c_str(), "w");
+    if (f == nullptr) return false;
+    fprintf(f, "driver=%s\n", driver.c_str());
+    fprintf(f, "device=%s\n", device.c_str());
+    fprintf(f, "samplerate=%u\n", sampleRate);
+    fprintf(f, "buffersize=%u\n", bufferSize);
+    fclose(f);
+    return true;
+#else
+    return false;
+    (void)driver; (void)device; (void)sampleRate; (void)bufferSize;
+#endif
+}
+
+static const int kDefaultHttpPort = 2229;
+
+// ---------------------------------------------------------------------------
+// Helpers
+
+static std::string jsonEscape(const std::string& s)
+{
+    std::string out;
+    out.reserve(s.size() + 4);
+    for (char c : s) {
+        switch (c) {
+            case '"':  out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n";  break;
+            case '\r': out += "\\r";  break;
+            case '\t': out += "\\t";  break;
+            default:   out += c;      break;
+        }
+    }
+    return out;
+}
+
+static void setCorsHeaders(httplib::Response& res)
+{
+    res.set_header("Access-Control-Allow-Origin", "*");
+    res.set_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    res.set_header("Access-Control-Allow-Headers", "Content-Type");
+}
+
+// Serialize a float to JSON — replaces inf/nan (invalid JSON) with null
+static std::string floatToJson(float v)
+{
+    if (std::isinf(v) || std::isnan(v)) return "null";
+    return std::to_string(v);
+}
+
+// Minimal JSON number extractor — avoids pulling in nlohmann/rapidjson
+static double extractNum(const std::string& body, const char* key)
+{
+    std::string k = std::string("\"") + key + "\"";
+    auto pos = body.find(k);
+    if (pos == std::string::npos) return 0.0;
+    pos = body.find(':', pos);
+    if (pos == std::string::npos) return 0.0;
+    try { return std::stod(body.substr(pos + 1)); }
+    catch (...) { return 0.0; }
+}
+
+static int64_t extractInt64(const std::string& body, const char* key)
+{
+    std::string k = std::string("\"") + key + "\"";
+    auto pos = body.find(k);
+    if (pos == std::string::npos) return 0;
+    pos = body.find(':', pos);
+    if (pos == std::string::npos) return 0;
+    try { return std::stoll(body.substr(pos + 1)); }
+    catch (...) { return 0; }
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/modules
+// Returns JSON array of {id, plugin, slug, name} for every module in the rack.
+
+static void handle_get_modules(const httplib::Request&, httplib::Response& res,
+                               CardinalBasePlugin* plugin)
+{
+    CardinalPluginContext* const context = plugin->context;
+    if (!context || !context->engine) {
+        res.status = 503;
+        res.set_content("{\"error\":\"engine not ready\"}", "application/json");
+        return;
+    }
+
+    std::string json = "[";
+    bool first = true;
+    {
+        std::lock_guard<std::mutex> mlock(gModuleAccessMutex);
+        rack::contextSet(context);
+        std::vector<int64_t> ids = context->engine->getModuleIds();
+        rack::contextSet(nullptr);
+        for (int64_t id : ids) {
+            rack::engine::Module* m = context->engine->getModule(id);
+            if (!m) continue;
+            if (!first) json += ",";
+            first = false;
+            json += "{\"id\":" + std::to_string(m->id)
+                  + ",\"plugin\":\"" + jsonEscape(m->model->plugin->slug) + "\""
+                  + ",\"slug\":\"" + jsonEscape(m->model->slug) + "\""
+                  + ",\"name\":\"" + jsonEscape(m->model->name) + "\"}";
+        }
+    }
+    json += "]";
+
+    setCorsHeaders(res);
+    res.set_content(json, "application/json");
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/params/:moduleId
+// Returns JSON array of {id, name, value, min, max} for every param of that module.
+
+static void handle_get_params(const httplib::Request& req, httplib::Response& res,
+                              CardinalBasePlugin* plugin)
+{
+    const int64_t moduleId = std::stoll(req.path_params.at("moduleId"));
+
+    CardinalPluginContext* const context = plugin->context;
+    if (!context || !context->engine) {
+        res.status = 503;
+        res.set_content("{\"error\":\"engine not ready\"}", "application/json");
+        return;
+    }
+
+    std::lock_guard<std::mutex> mlock(gModuleAccessMutex);
+    rack::engine::Module* const module = context->engine->getModule(moduleId);
+    if (!module) {
+        res.status = 404;
+        res.set_content("{\"error\":\"module not found\"}", "application/json");
+        return;
+    }
+
+    std::string json = "[";
+    bool first = true;
+    for (size_t i = 0; i < module->params.size(); ++i) {
+        // Use .value directly — getValue() is not const
+        float val    = module->params[i].value;
+        const rack::ParamQuantity* pq = (module->paramQuantities.size() > i)
+                                        ? module->paramQuantities[i] : nullptr;
+        // Skip removed/unconfigured params (name == ""): they are placeholder
+        // slots from old enum values that were removed in a later version.
+        if (!pq || pq->name.empty()) continue;
+        if (!first) json += ",";
+        first = false;
+        std::string name = jsonEscape(pq->name);
+        float minVal = pq->minValue;
+        float maxVal = pq->maxValue;
+        json += "{\"id\":" + std::to_string(i)
+              + ",\"name\":\"" + name + "\""
+              + ",\"value\":" + floatToJson(val)
+              + ",\"min\":" + floatToJson(minVal)
+              + ",\"max\":" + floatToJson(maxVal) + "}";
+    }
+    json += "]";
+
+    setCorsHeaders(res);
+    res.set_content(json, "application/json");
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/param
+// Body JSON: {"moduleId": <int64>, "paramId": <int>, "value": <float>}
+// Sets an absolute parameter value.
+
+static void handle_post_param(const httplib::Request& req, httplib::Response& res,
+                              CardinalBasePlugin* plugin)
+{
+    CardinalPluginContext* const context = plugin->context;
+    if (!context || !context->engine) {
+        res.status = 503;
+        res.set_content("{\"error\":\"engine not ready\"}", "application/json");
+        return;
+    }
+
+    const int64_t moduleId = extractInt64(req.body, "moduleId");
+    const int     paramId  = static_cast<int>(extractNum(req.body, "paramId"));
+    const float   value    = static_cast<float>(extractNum(req.body, "value"));
+
+    std::lock_guard<std::mutex> mlock(gModuleAccessMutex);
+    rack::engine::Module* const module = context->engine->getModule(moduleId);
+    if (!module) {
+        res.status = 404;
+        res.set_content("{\"error\":\"module not found\"}", "application/json");
+        return;
+    }
+    if (paramId < 0 || paramId >= static_cast<int>(module->params.size())) {
+        res.status = 400;
+        res.set_content("{\"error\":\"paramId out of range\"}", "application/json");
+        return;
+    }
+
+    context->engine->setParamValue(module, paramId, value);
+
+    setCorsHeaders(res);
+    res.set_content("{\"ok\":true}", "application/json");
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/param/delta
+// Body JSON: {"moduleId": <int64>, "paramId": <int>, "delta": <float>}
+// Adds delta to the current parameter value.
+// Correct approach for endless-encoder parameters (range -INF/+INF).
+
+static void handle_post_param_delta(const httplib::Request& req, httplib::Response& res,
+                                    CardinalBasePlugin* plugin)
+{
+    CardinalPluginContext* const context = plugin->context;
+    if (!context || !context->engine) {
+        res.status = 503;
+        res.set_content("{\"error\":\"engine not ready\"}", "application/json");
+        return;
+    }
+
+    const int64_t moduleId = extractInt64(req.body, "moduleId");
+    const int     paramId  = static_cast<int>(extractNum(req.body, "paramId"));
+    const float   delta    = static_cast<float>(extractNum(req.body, "delta"));
+
+    std::lock_guard<std::mutex> mlock(gModuleAccessMutex);
+    rack::engine::Module* const module = context->engine->getModule(moduleId);
+    if (!module) {
+        res.status = 404;
+        res.set_content("{\"error\":\"module not found\"}", "application/json");
+        return;
+    }
+    if (paramId < 0 || paramId >= static_cast<int>(module->params.size())) {
+        res.status = 400;
+        res.set_content("{\"error\":\"paramId out of range\"}", "application/json");
+        return;
+    }
+
+    const float current = module->params[paramId].value;
+    const float newVal  = current + delta;
+    context->engine->setParamValue(module, paramId, newVal);
+
+    setCorsHeaders(res);
+    res.set_content("{\"ok\":true,\"value\":" + std::to_string(newVal) + "}",
+                    "application/json");
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/cables
+// Returns JSON array of {id, outModuleId, outPortId, outPortName, outModuleName,
+//                           inModuleId,  inPortId,  inPortName,  inModuleName}.
+
+static void handle_get_cables(const httplib::Request&, httplib::Response& res,
+                              CardinalBasePlugin* plugin)
+{
+    CardinalPluginContext* const context = plugin->context;
+    if (!context || !context->engine) {
+        res.status = 503;
+        res.set_content("{\"error\":\"engine not ready\"}", "application/json");
+        return;
+    }
+
+    // Returns the configured name for a port, empty string if unavailable.
+    auto portName = [](rack::engine::Module* mod, int portId, bool output) -> std::string {
+        if (!mod) return "";
+        auto& infos = output ? mod->outputInfos : mod->inputInfos;
+        if (portId < 0 || portId >= (int)infos.size() || !infos[portId]) return "";
+        return infos[portId]->getName();
+    };
+
+    auto modName = [](rack::engine::Module* mod) -> std::string {
+        if (!mod || !mod->model) return "";
+        return mod->model->name;
+    };
+
+    std::string json = "[";
+    bool first = true;
+    {
+        std::lock_guard<std::mutex> mlock(gModuleAccessMutex);
+        rack::contextSet(context);
+        std::vector<int64_t> ids = context->engine->getCableIds();
+        rack::contextSet(nullptr);
+        for (int64_t id : ids) {
+            rack::engine::Cable* c = context->engine->getCable(id);
+            if (!c) continue;
+            if (!first) json += ",";
+            first = false;
+            json += "{\"id\":" + std::to_string(c->id)
+                  + ",\"outModuleId\":" + std::to_string(c->outputModule ? c->outputModule->id : -1LL)
+                  + ",\"outPortId\":" + std::to_string(c->outputId)
+                  + ",\"outPortName\":\"" + jsonEscape(portName(c->outputModule, c->outputId, true)) + "\""
+                  + ",\"outModuleName\":\"" + jsonEscape(modName(c->outputModule)) + "\""
+                  + ",\"inModuleId\":" + std::to_string(c->inputModule  ? c->inputModule->id  : -1LL)
+                  + ",\"inPortId\":" + std::to_string(c->inputId)
+                  + ",\"inPortName\":\"" + jsonEscape(portName(c->inputModule,  c->inputId,  false)) + "\""
+                  + ",\"inModuleName\":\"" + jsonEscape(modName(c->inputModule)) + "\"";
+            json += "}";
+        }
+    }
+    json += "]";
+
+    setCorsHeaders(res);
+    res.set_content(json, "application/json");
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/cables
+// Body: {outModuleId, outPortId, inModuleId, inPortId}
+// Creates a cable. Returns {id} of the new cable.
+
+static void handle_post_cables(const httplib::Request& req, httplib::Response& res,
+                               CardinalBasePlugin* plugin)
+{
+    const int64_t outModuleId = extractInt64(req.body, "outModuleId");
+    const int64_t outPortId   = (int64_t)extractNum(req.body, "outPortId");
+    const int64_t inModuleId  = extractInt64(req.body, "inModuleId");
+    const int64_t inPortId    = (int64_t)extractNum(req.body, "inPortId");
+
+    CardinalPluginContext* const context = plugin->context;
+    if (!context || !context->engine) {
+        res.status = 503;
+        res.set_content("{\"error\":\"engine not ready\"}", "application/json");
+        return;
+    }
+
+    PendingEngineOp op;
+    op.type        = PendingEngineOp::ADD_CABLE;
+    op.outModuleId = outModuleId;
+    op.outPortId   = outPortId;
+    op.inModuleId  = inModuleId;
+    op.inPortId    = inPortId;
+
+    {
+        std::lock_guard<std::mutex> chk(gEngineOpMutex);
+        if (gPendingEngineOp) {
+            res.status = 429;
+            res.set_content("{\"error\":\"engine busy, retry\"}", "application/json");
+            return;
+        }
+        gPendingEngineOp = &op;
+    }
+
+    bool completed;
+    {
+        std::unique_lock<std::mutex> ulock(gEngineOpMutex);
+        completed = gEngineOpCV.wait_for(ulock, std::chrono::seconds(3),
+            [&]{ return op.done; });
+        gPendingEngineOp = nullptr;
+    }
+
+    if (!completed) {
+        res.status = 504;
+        res.set_content("{\"error\":\"timeout: audio not processing\"}", "application/json");
+        return;
+    }
+    if (!op.error.empty()) {
+        res.status = (op.error.find("not found") != std::string::npos) ? 404 : 400;
+        res.set_content("{\"error\":\"" + op.error + "\"}", "application/json");
+        return;
+    }
+    setCorsHeaders(res);
+    res.set_content("{\"id\":" + std::to_string(op.resultId) + "}", "application/json");
+}
+
+// ---------------------------------------------------------------------------
+// DELETE /api/cables/:cableId
+// Removes a cable by ID.
+
+static void handle_delete_cable(const httplib::Request& req, httplib::Response& res,
+                                CardinalBasePlugin* plugin)
+{
+    int64_t cableId;
+    try { cableId = std::stoll(req.path_params.at("cableId")); }
+    catch (...) {
+        res.status = 400;
+        res.set_content("{\"error\":\"invalid cableId\"}", "application/json");
+        return;
+    }
+
+    CardinalPluginContext* const context = plugin->context;
+    if (!context || !context->engine) {
+        res.status = 503;
+        res.set_content("{\"error\":\"engine not ready\"}", "application/json");
+        return;
+    }
+
+    PendingEngineOp op;
+    op.type    = PendingEngineOp::REMOVE_CABLE;
+    op.cableId = cableId;
+
+    {
+        std::lock_guard<std::mutex> chk(gEngineOpMutex);
+        if (gPendingEngineOp) {
+            res.status = 429;
+            res.set_content("{\"error\":\"engine busy, retry\"}", "application/json");
+            return;
+        }
+        gPendingEngineOp = &op;
+    }
+
+    bool completed;
+    {
+        std::unique_lock<std::mutex> ulock(gEngineOpMutex);
+        completed = gEngineOpCV.wait_for(ulock, std::chrono::seconds(3),
+            [&]{ return op.done; });
+        gPendingEngineOp = nullptr;
+    }
+
+    if (!completed) {
+        res.status = 504;
+        res.set_content("{\"error\":\"timeout: audio not processing\"}", "application/json");
+        return;
+    }
+    if (!op.error.empty()) {
+        res.status = (op.error.find("not found") != std::string::npos) ? 404 : 400;
+        res.set_content("{\"error\":\"" + op.error + "\"}", "application/json");
+        return;
+    }
+    setCorsHeaders(res);
+    res.set_content("{\"ok\":true}", "application/json");
+}
+
+// ---------------------------------------------------------------------------
+// Minimal JSON string extractor (for plugin/module slugs — no escape handling needed)
+
+static std::string extractString(const std::string& body, const char* key)
+{
+    std::string k = std::string("\"") + key + "\"";
+    auto pos = body.find(k);
+    if (pos == std::string::npos) return "";
+    pos = body.find(':', pos);
+    if (pos == std::string::npos) return "";
+    pos = body.find('"', pos);
+    if (pos == std::string::npos) return "";
+    ++pos;
+    auto end = body.find('"', pos);
+    if (end == std::string::npos) return "";
+    return body.substr(pos, end - pos);
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/modules
+// Body: {pluginSlug, moduleSlug}
+// Adds a module to the engine. Returns {id} of the new module.
+
+static void handle_post_modules(const httplib::Request& req, httplib::Response& res,
+                                CardinalBasePlugin* plugin)
+{
+    const std::string pluginSlug = extractString(req.body, "pluginSlug");
+    const std::string moduleSlug = extractString(req.body, "moduleSlug");
+
+    if (pluginSlug.empty() || moduleSlug.empty()) {
+        res.status = 400;
+        res.set_content("{\"error\":\"missing pluginSlug or moduleSlug\"}", "application/json");
+        return;
+    }
+
+    CardinalPluginContext* const context = plugin->context;
+    if (!context || !context->engine) {
+        res.status = 503;
+        res.set_content("{\"error\":\"engine not ready\"}", "application/json");
+        return;
+    }
+
+    PendingEngineOp op;
+    op.type       = PendingEngineOp::ADD_MODULE;
+    op.pluginSlug = pluginSlug;
+    op.moduleSlug = moduleSlug;
+
+    {
+        std::lock_guard<std::mutex> chk(gEngineOpMutex);
+        if (gPendingEngineOp) {
+            res.status = 429;
+            res.set_content("{\"error\":\"engine busy, retry\"}", "application/json");
+            return;
+        }
+        gPendingEngineOp = &op;
+    }
+
+    bool completed;
+    {
+        std::unique_lock<std::mutex> ulock(gEngineOpMutex);
+        completed = gEngineOpCV.wait_for(ulock, std::chrono::seconds(3),
+            [&]{ return op.done; });
+        gPendingEngineOp = nullptr;
+    }
+
+    if (!completed) {
+        res.status = 504;
+        res.set_content("{\"error\":\"timeout: audio not processing\"}", "application/json");
+        return;
+    }
+    if (!op.error.empty()) {
+        res.status = (op.error.find("not found") != std::string::npos) ? 404 : 500;
+        res.set_content("{\"error\":\"" + op.error + "\"}", "application/json");
+        return;
+    }
+    setCorsHeaders(res);
+    res.set_content("{\"id\":" + std::to_string(op.resultId) + "}", "application/json");
+}
+
+// ---------------------------------------------------------------------------
+// DELETE /api/modules/:moduleId
+// Removes a module and all its connected cables from the engine.
+
+static void handle_delete_module(const httplib::Request& req, httplib::Response& res,
+                                 CardinalBasePlugin* plugin)
+{
+    int64_t moduleId;
+    try { moduleId = std::stoll(req.path_params.at("moduleId")); }
+    catch (...) {
+        res.status = 400;
+        res.set_content("{\"error\":\"invalid moduleId\"}", "application/json");
+        return;
+    }
+
+    CardinalPluginContext* const context = plugin->context;
+    if (!context || !context->engine) {
+        res.status = 503;
+        res.set_content("{\"error\":\"engine not ready\"}", "application/json");
+        return;
+    }
+
+    PendingEngineOp op;
+    op.type     = PendingEngineOp::REMOVE_MODULE;
+    op.moduleId = moduleId;
+
+    {
+        std::lock_guard<std::mutex> chk(gEngineOpMutex);
+        if (gPendingEngineOp) {
+            res.status = 429;
+            res.set_content("{\"error\":\"engine busy, retry\"}", "application/json");
+            return;
+        }
+        gPendingEngineOp = &op;
+    }
+
+    bool completed;
+    {
+        std::unique_lock<std::mutex> ulock(gEngineOpMutex);
+        completed = gEngineOpCV.wait_for(ulock, std::chrono::seconds(3),
+            [&]{ return op.done; });
+        gPendingEngineOp = nullptr;
+    }
+
+    if (!completed) {
+        res.status = 504;
+        res.set_content("{\"error\":\"timeout: audio not processing\"}", "application/json");
+        return;
+    }
+    if (!op.error.empty()) {
+        res.status = (op.error.find("not found") != std::string::npos) ? 404 : 500;
+        res.set_content("{\"error\":\"" + op.error + "\"}", "application/json");
+        return;
+    }
+    setCorsHeaders(res);
+    res.set_content("{\"ok\":true}", "application/json");
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/modules/:moduleId/file
+// Body: {"key": "wavetable", "path": "/absolute/path/to/file.wav"}
+// Calls module->loadFile(key, path). The module handles its own thread safety.
+// Designed for file-bearing modules (e.g. Fundamental VCO2, WTLFO wavetables).
+
+static void handle_post_module_file(const httplib::Request& req, httplib::Response& res,
+                                    CardinalBasePlugin* plugin)
+{
+    int64_t moduleId;
+    try { moduleId = std::stoll(req.path_params.at("moduleId")); }
+    catch (...) {
+        res.status = 400;
+        res.set_content("{\"error\":\"invalid moduleId\"}", "application/json");
+        return;
+    }
+
+    // Parse body with jansson so backslashes in Windows paths are unescaped.
+    json_error_t jerr;
+    json_t* rootJ = json_loadb(req.body.c_str(), req.body.size(), 0, &jerr);
+    if (!rootJ) {
+        res.status = 400;
+        res.set_content("{\"error\":\"invalid JSON body\"}", "application/json");
+        return;
+    }
+    const char* keyC  = json_string_value(json_object_get(rootJ, "key"));
+    const char* pathC = json_string_value(json_object_get(rootJ, "path"));
+    if (!keyC || !pathC) {
+        json_decref(rootJ);
+        res.status = 400;
+        res.set_content("{\"error\":\"missing key or path\"}", "application/json");
+        return;
+    }
+    std::string key  = keyC;
+    std::string path = pathC;
+    json_decref(rootJ);
+
+    CardinalPluginContext* const context = plugin->context;
+    if (!context || !context->engine) {
+        res.status = 503;
+        res.set_content("{\"error\":\"engine not ready\"}", "application/json");
+        return;
+    }
+
+    rack::contextSet(context);
+    rack::engine::Module* module = context->engine->getModule(moduleId);
+    // Keep context set during loadFile() so APP->engine is valid for modules
+    // that call APP->engine->getSampleRate() (e.g. SamplePlayer::updateStepAmount).
+
+    if (!module) {
+        rack::contextSet(nullptr);
+        res.status = 404;
+        res.set_content("{\"error\":\"module not found\"}", "application/json");
+        return;
+    }
+
+    // loadFile() implementations handle their own thread safety.
+    // Modules that use concurrent buffer access (e.g. voxglitch) pre-load into a
+    // staging object on this (HTTP) thread and do a fast atomic swap inside process().
+    bool handled = module->loadFile(key, path);
+    rack::contextSet(nullptr);
+
+    if (!handled) {
+        res.status = 400;
+        res.set_content("{\"error\":\"module does not support loadFile for key: " + key + "\"}", "application/json");
+        return;
+    }
+
+    setCorsHeaders(res);
+    res.set_content("{\"ok\":true}", "application/json");
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/patch
+// Returns the current patch as JSON text.
+
+static void handle_get_patch(const httplib::Request&, httplib::Response& res,
+                             CardinalBasePlugin* plugin)
+{
+    CardinalPluginContext* const context = plugin->context;
+    if (!context || !context->engine) {
+        res.status = 503;
+        res.set_content("{\"error\":\"engine not ready\"}", "application/json");
+        return;
+    }
+
+    rack::contextSet(context);
+    try {
+        json_t* const rootJ = APP->patch->toJson();
+        char* const   text  = json_dumps(rootJ, JSON_INDENT(2));
+        json_decref(rootJ);
+        rack::contextSet(nullptr);
+        setCorsHeaders(res);
+        res.set_content(text, "application/json");
+        std::free(text);
+    }
+    catch (...) {
+        rack::contextSet(nullptr);
+        res.status = 500;
+        res.set_content("{\"error\":\"failed to serialize patch\"}", "application/json");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/patch/load
+// Body: raw JSON text of a patch.
+
+static void handle_post_patch_load(const httplib::Request& req, httplib::Response& res,
+                                   CardinalBasePlugin* plugin)
+{
+    CardinalPluginContext* const context = plugin->context;
+    if (!context || !context->engine) {
+        res.status = 503;
+        res.set_content("{\"error\":\"engine not ready\"}", "application/json");
+        return;
+    }
+
+    // Validate JSON before storing
+    json_error_t error;
+    json_t* const rootJ = json_loads(req.body.c_str(), 0, &error);
+    if (!rootJ) {
+        res.status = 400;
+        std::string msg = std::string("{\"error\":\"invalid JSON: ")
+                        + jsonEscape(error.text) + "\"}";
+        res.set_content(msg, "application/json");
+        return;
+    }
+    // If body is {"path": "..."}, delegate the full load() to the UI thread
+    // (which calls Manager::load() — handles both V1 and modern .vcv format,
+    // calls clear() first to remove existing modules, then extracts + loadAutosave()).
+    json_t* const pathJ = json_object_get(rootJ, "path");
+    if (pathJ && json_is_string(pathJ)) {
+        const std::string vcvPath = json_string_value(pathJ);
+        json_decref(rootJ);
+
+        // Quick existence check before queuing.
+        {
+            FILE* const ftest = std::fopen(vcvPath.c_str(), "rb");
+            if (!ftest) {
+                res.status = 404;
+                setCorsHeaders(res);
+                res.set_content("{\"error\":\"cannot open file\"}", "application/json");
+                return;
+            }
+            std::fclose(ftest);
+        }
+
+        // Store path and signal the UI thread to call ctx->patch->load(path).
+        {
+            std::lock_guard<std::mutex> lock(gPendingPathMutex);
+            gPendingPatchPath = vcvPath;
+        }
+        {
+            std::lock_guard<std::mutex> lk(gPatchSyncMtx);
+            gPatchSyncDone = false;
+        }
+        gFlagSetCount.fetch_add(1, std::memory_order_relaxed);
+        gPendingPatchFromUI.store(true);  // goes directly to UI thread
+
+        // Wait up to 10 s for the UI thread to complete the load.
+        bool completed = false;
+        {
+            std::unique_lock<std::mutex> lk(gPatchSyncMtx);
+            completed = gPatchSyncCV.wait_for(lk, std::chrono::seconds(10),
+                                              []{ return gPatchSyncDone; });
+        }
+        setCorsHeaders(res);
+        const std::string result = gLastPatchLoadResult;
+        res.set_content(completed
+            ? ("{\"ok\":true,\"result\":\"" + jsonEscape(result) + "\"}")
+            : "{\"ok\":false,\"error\":\"timeout waiting for UI thread\"}",
+            "application/json");
+        return;
+    }
+    json_decref(rootJ);
+
+    // Queue JSON-body load: audio thread writes patch.json, UI thread calls loadAutosave().
+    // Wait synchronously so the response reflects the actual load result.
+    { std::lock_guard<std::mutex> lock(gPendingPathMutex); gPendingPatchPath.clear(); }
+    {
+        std::lock_guard<std::mutex> lock(gPendingPatchMutex);
+        gPendingPatchJson = req.body;
+    }
+    {
+        std::lock_guard<std::mutex> lk(gPatchSyncMtx);
+        gPatchSyncDone = false;
+    }
+    gPendingPatchLoad.store(true);
+    gFlagSetCount.fetch_add(1, std::memory_order_relaxed);
+
+    bool completed = false;
+    {
+        std::unique_lock<std::mutex> lk(gPatchSyncMtx);
+        completed = gPatchSyncCV.wait_for(lk, std::chrono::seconds(10),
+                                          []{ return gPatchSyncDone; });
+    }
+    setCorsHeaders(res);
+    const std::string result = gLastPatchLoadResult;
+    res.set_content(completed
+        ? ("{\"ok\":true,\"result\":\"" + jsonEscape(result) + "\"}")
+        : "{\"ok\":false,\"error\":\"timeout\"}",
+        "application/json");
+}
+
+// ---------------------------------------------------------------------------
+// Initializer methods
+
+// Called from CardinalPlugin::run() — audio thread, context already set.
+// Writes the pending patch JSON to autosavePath and calls loadAutosave(),
+// mirroring exactly what CardinalPlugin::setState("patch", ...) does.
+void Initializer::processPendingHttpRequests(const std::string& autosavePath,
+                                             CardinalPluginContext* ctx)
+{
+    gRunCallCount.fetch_add(1, std::memory_order_relaxed);
+
+    // Execute any pending engine mutation.
+    // Safe here: audio thread is between stepBlock() calls, no engine lock held.
+    {
+        std::lock_guard<std::mutex> lock(gEngineOpMutex);
+        if (gPendingEngineOp && !gPendingEngineOp->done && ctx && ctx->engine) {
+            PendingEngineOp* op = gPendingEngineOp;
+            switch (op->type) {
+
+            case PendingEngineOp::ADD_MODULE: {
+                rack::plugin::Model* model = rack::plugin::getModel(op->pluginSlug, op->moduleSlug);
+                if (!model) {
+                    op->error = "model not found: " + op->pluginSlug + "/" + op->moduleSlug;
+                } else {
+                    rack::engine::Module* module = model->createModule();
+                    if (!module) {
+                        op->error = "createModule failed";
+                    } else {
+                        ctx->engine->addModule(module);
+                        op->resultId = module->id;
+                    }
+                }
+                break;
+            }
+
+            case PendingEngineOp::REMOVE_MODULE: {
+                rack::engine::Module* module = ctx->engine->getModule(op->moduleId);
+                if (!module) {
+                    op->error = "module not found";
+                } else {
+                    std::vector<rack::engine::Cable*> toRemove;
+                    for (int64_t cid : ctx->engine->getCableIds()) {
+                        rack::engine::Cable* c = ctx->engine->getCable(cid);
+                        if (c && (c->inputModule == module || c->outputModule == module))
+                            toRemove.push_back(c);
+                    }
+                    for (rack::engine::Cable* c : toRemove) {
+                        ctx->engine->removeCable(c);
+                        delete c;
+                    }
+                    ctx->engine->removeModule(module);
+                    delete module;
+                }
+                break;
+            }
+
+            case PendingEngineOp::ADD_CABLE: {
+                rack::engine::Module* outMod = ctx->engine->getModule(op->outModuleId);
+                rack::engine::Module* inMod  = ctx->engine->getModule(op->inModuleId);
+                if (!outMod || !inMod) {
+                    op->error = "module not found";
+                } else if (op->outPortId < 0 || op->outPortId >= (int64_t)outMod->outputs.size()) {
+                    op->error = "invalid outPortId";
+                } else if (op->inPortId < 0 || op->inPortId >= (int64_t)inMod->inputs.size()) {
+                    op->error = "invalid inPortId";
+                } else {
+                    rack::engine::Cable* cable = new rack::engine::Cable;
+                    cable->outputModule = outMod;
+                    cable->outputId     = (int)op->outPortId;
+                    cable->inputModule  = inMod;
+                    cable->inputId      = (int)op->inPortId;
+                    try {
+                        ctx->engine->addCable(cable);
+                        op->resultId = cable->id;
+                    } catch (...) {
+                        delete cable;
+                        op->error = "addCable failed (port already connected?)";
+                    }
+                }
+                break;
+            }
+
+            case PendingEngineOp::REMOVE_CABLE: {
+                rack::engine::Cable* cable = ctx->engine->getCable(op->cableId);
+                if (!cable) {
+                    op->error = "cable not found";
+                } else {
+                    ctx->engine->removeCable(cable);
+                    delete cable;
+                }
+                break;
+            }
+            } // switch
+
+            op->done = true;
+            gEngineOpCV.notify_all();
+        }
+    }
+
+    if (!gPendingPatchLoad.load())
+        return;
+
+    gFlagDetectedCount.fetch_add(1, std::memory_order_relaxed);
+
+    std::string json;
+    {
+        std::lock_guard<std::mutex> lock(gPendingPatchMutex);
+        json = gPendingPatchJson;
+        gPendingPatchJson.clear();
+    }
+    gPendingPatchLoad.store(false);
+
+    if (!autosavePath.empty())
+        rack::system::createDirectories(autosavePath);
+
+    // Inline JSON load: write the body directly as autosave/patch.json.
+    const std::string patchFile = rack::system::join(autosavePath, "patch.json");
+    FILE* const f = std::fopen(patchFile.c_str(), "w");
+    if (!f) {
+        gLastPatchLoadResult = "fopen_failed:errno:" + std::to_string(errno);
+        d_stdout("Cardinal HTTP: cannot open %s for writing (errno %d)", patchFile.c_str(), errno);
+        return;
+    }
+    std::fwrite(json.c_str(), json.size(), 1, f);
+    std::fclose(f);
+
+    // If the UI is not open (APP->scene is null), call loadAutosave() directly here.
+    // fromJson() already null-guards all APP->scene accesses, so no GL ops occur —
+    // only APP->engine->fromJson() runs, which is safe from the audio thread.
+    if (APP->scene == nullptr)
+    {
+        {
+            std::lock_guard<std::mutex> mlock(gModuleAccessMutex);
+            try {
+                ctx->patch->loadAutosave();
+                rack::contextSet(nullptr);
+                const size_t modCount = ctx->engine->getModuleIds().size();
+                gLastPatchLoadResult = "ok:headless:mods:" + std::to_string(modCount);
+                d_stdout("Cardinal HTTP: headless patch loaded OK (%zu modules)", modCount);
+            }
+            catch (const rack::Exception& e) {
+                rack::contextSet(nullptr);
+                gLastPatchLoadResult = std::string("rack_ex_headless:") + e.what();
+                d_stdout("Cardinal HTTP: headless patch load failed: %s", e.what());
+            }
+            catch (...) {
+                rack::contextSet(nullptr);
+                gLastPatchLoadResult = "unknown_ex_headless";
+                d_stdout("Cardinal HTTP: headless patch load threw unknown exception");
+            }
+        }
+        { std::lock_guard<std::mutex> lk(gPatchSyncMtx); gPatchSyncDone = true; }
+        gPatchSyncCV.notify_all();
+        return;
+    }
+
+    gLastPatchLoadResult = "file_written_waiting_ui_thread";
+    // Signal the UI thread to call loadAutosave() safely.
+    gPendingPatchFromUI.store(true);
+}
+
+// Called from CardinalUI::uiIdle() — UI thread only.
+// For path-based loads: calls ctx->patch->load(path) which handles both V1 and modern
+// .vcv format, calls clear() to remove existing modules, then extracts + loadAutosave().
+// For JSON-body loads: autosave/patch.json was already written; calls loadAutosave() only.
+void httpProcessPendingPatchFromUI(CardinalPluginContext* ctx)
+{
+    if (!gPendingPatchFromUI.load())
+        return;
+    gPendingPatchFromUI.store(false);
+
+    // Read path (may be empty for JSON-body loads)
+    std::string loadPath;
+    {
+        std::lock_guard<std::mutex> lock(gPendingPathMutex);
+        loadPath = gPendingPatchPath;
+        gPendingPatchPath.clear();
+    }
+
+    {
+        std::lock_guard<std::mutex> mlock(gModuleAccessMutex);
+        rack::contextSet(ctx);
+        try {
+            if (!loadPath.empty()) {
+                d_stdout("Cardinal HTTP: UI-thread loading from path: %s", loadPath.c_str());
+                ctx->patch->load(loadPath);
+            } else {
+                ctx->patch->loadAutosave();
+            }
+            rack::contextSet(nullptr);
+            const size_t modCount = ctx->engine->getModuleIds().size();
+            gLastPatchLoadResult = "ok:mods:" + std::to_string(modCount);
+            d_stdout("Cardinal HTTP: UI-thread patch loaded OK (%zu modules)", modCount);
+        }
+        catch (const rack::Exception& e) {
+            rack::contextSet(nullptr);
+            gLastPatchLoadResult = std::string("rack_ex:") + e.what();
+            d_stdout("Cardinal HTTP: UI-thread patch load failed: %s", e.what());
+        }
+        catch (...) {
+            rack::contextSet(nullptr);
+            gLastPatchLoadResult = "unknown_ex";
+            d_stdout("Cardinal HTTP: UI-thread patch load threw unknown exception");
+        }
+    }
+
+    // Signal any HTTP thread waiting for this load to complete (path-based sync load).
+    {
+        std::lock_guard<std::mutex> lk(gPatchSyncMtx);
+        gPatchSyncDone = true;
+    }
+    gPatchSyncCV.notify_all();
+}
+
+
+// ---------------------------------------------------------------------------
+// WebSocket /api/ws
+// Streams live parameter changes every 50 ms.
+// JSON frames: [{"m":<moduleId>,"p":<paramId>,"v":<value>}, ...]
+
+static void handle_ws(const httplib::Request&, httplib::ws::WebSocket& ws,
+                      CardinalBasePlugin* plugin)
+{
+    using ParamKey = std::pair<int64_t, int>;
+    std::map<ParamKey, float> snapshot;
+
+    while (ws.is_open()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+        if (!plugin) continue;
+        CardinalPluginContext* const context = plugin->context;
+        if (!context || !context->engine) continue;
+
+        std::vector<int64_t> ids;
+        std::map<ParamKey, float> current;
+        {
+            std::lock_guard<std::mutex> mlock(gModuleAccessMutex);
+            ids = context->engine->getModuleIds();
+            for (int64_t id : ids) {
+                rack::engine::Module* m = context->engine->getModule(id);
+                if (!m) continue;
+                for (size_t i = 0; i < m->params.size(); ++i)
+                    current[{id, (int)i}] = m->params[i].value;
+            }
+        }
+
+        std::string json = "[";
+        bool first = true;
+        for (auto& [key, val] : current) {
+            auto it = snapshot.find(key);
+            if (it == snapshot.end() || it->second != val) {
+                if (!first) json += ",";
+                first = false;
+                json += "{\"m\":" + std::to_string(key.first)
+                      + ",\"p\":" + std::to_string(key.second)
+                      + ",\"v\":" + floatToJson(val) + "}";
+            }
+        }
+        json += "]";
+        snapshot = std::move(current);
+
+        if (json != "[]")
+            if (!ws.send(json)) break;
+    }
+}
+
+void Initializer::startHttpServer()
+{
+    if (gHttpRunning.load())
+        return;
+
+    gHttpServer = new httplib::Server();
+    httplib::Server* srv = gHttpServer;
+
+    // CORS pre-flight
+    srv->Options(".*", [](const httplib::Request&, httplib::Response& res) {
+        setCorsHeaders(res);
+        res.status = 204;
+    });
+
+    Initializer* const self = this;
+
+    srv->Get("/api/modules", [self](const httplib::Request& req, httplib::Response& res) {
+        if (self->httpPluginInstance) handle_get_modules(req, res, self->httpPluginInstance);
+        else { res.status = 503; res.set_content("{\"error\":\"no plugin\"}", "application/json"); }
+    });
+
+    srv->Get("/api/params/:moduleId", [self](const httplib::Request& req, httplib::Response& res) {
+        if (self->httpPluginInstance) handle_get_params(req, res, self->httpPluginInstance);
+        else { res.status = 503; res.set_content("{\"error\":\"no plugin\"}", "application/json"); }
+    });
+
+    srv->Post("/api/param", [self](const httplib::Request& req, httplib::Response& res) {
+        if (self->httpPluginInstance) handle_post_param(req, res, self->httpPluginInstance);
+        else { res.status = 503; res.set_content("{\"error\":\"no plugin\"}", "application/json"); }
+    });
+
+    srv->Post("/api/param/delta", [self](const httplib::Request& req, httplib::Response& res) {
+        if (self->httpPluginInstance) handle_post_param_delta(req, res, self->httpPluginInstance);
+        else { res.status = 503; res.set_content("{\"error\":\"no plugin\"}", "application/json"); }
+    });
+
+    srv->Get("/api/patch", [self](const httplib::Request& req, httplib::Response& res) {
+        if (self->httpPluginInstance) handle_get_patch(req, res, self->httpPluginInstance);
+        else { res.status = 503; res.set_content("{\"error\":\"no plugin\"}", "application/json"); }
+    });
+
+    srv->Post("/api/patch/load", [self](const httplib::Request& req, httplib::Response& res) {
+        if (self->httpPluginInstance) handle_post_patch_load(req, res, self->httpPluginInstance);
+        else { res.status = 503; res.set_content("{\"error\":\"no plugin\"}", "application/json"); }
+    });
+
+    srv->Get("/api/cables", [self](const httplib::Request& req, httplib::Response& res) {
+        if (self->httpPluginInstance) handle_get_cables(req, res, self->httpPluginInstance);
+        else { res.status = 503; res.set_content("{\"error\":\"no plugin\"}", "application/json"); }
+    });
+
+    srv->Post("/api/cables", [self](const httplib::Request& req, httplib::Response& res) {
+        if (self->httpPluginInstance) handle_post_cables(req, res, self->httpPluginInstance);
+        else { res.status = 503; res.set_content("{\"error\":\"no plugin\"}", "application/json"); }
+    });
+
+    srv->Delete("/api/cables/:cableId", [self](const httplib::Request& req, httplib::Response& res) {
+        if (self->httpPluginInstance) handle_delete_cable(req, res, self->httpPluginInstance);
+        else { res.status = 503; res.set_content("{\"error\":\"no plugin\"}", "application/json"); }
+    });
+
+    srv->Post("/api/modules", [self](const httplib::Request& req, httplib::Response& res) {
+        if (self->httpPluginInstance) handle_post_modules(req, res, self->httpPluginInstance);
+        else { res.status = 503; res.set_content("{\"error\":\"no plugin\"}", "application/json"); }
+    });
+
+    srv->Delete("/api/modules/:moduleId", [self](const httplib::Request& req, httplib::Response& res) {
+        if (self->httpPluginInstance) handle_delete_module(req, res, self->httpPluginInstance);
+        else { res.status = 503; res.set_content("{\"error\":\"no plugin\"}", "application/json"); }
+    });
+
+    srv->Post("/api/modules/:moduleId/file", [self](const httplib::Request& req, httplib::Response& res) {
+        if (self->httpPluginInstance) handle_post_module_file(req, res, self->httpPluginInstance);
+        else { res.status = 503; res.set_content("{\"error\":\"no plugin\"}", "application/json"); }
+    });
+
+    // Audio device & config endpoints (native standalone only; safe to call from all formats)
+    srv->Get("/api/audio/devices", [](const httplib::Request&, httplib::Response& res) {
+        setCorsHeaders(res);
+        res.set_content(gCardinalAudioDevicesJson, "application/json");
+    });
+
+    srv->Get("/api/audio/config", [](const httplib::Request&, httplib::Response& res) {
+        setCorsHeaders(res);
+        res.set_content(gCardinalAudioConfigJson, "application/json");
+    });
+
+    srv->Post("/api/audio/config", [](const httplib::Request& req, httplib::Response& res) {
+        setCorsHeaders(res);
+        const std::string& body = req.body;
+
+        // Simple JSON field extraction (known fixed format)
+        auto getStr = [&](const char* key) -> std::string {
+            std::string k = std::string("\"") + key + "\"";
+            size_t pos = body.find(k);
+            if (pos == std::string::npos) return "";
+            pos = body.find('"', pos + k.size() + 1);
+            if (pos == std::string::npos) return "";
+            ++pos;
+            size_t end = body.find('"', pos);
+            return end == std::string::npos ? "" : body.substr(pos, end - pos);
+        };
+        auto getInt = [&](const char* key, uint32_t def) -> uint32_t {
+            std::string k = std::string("\"") + key + "\"";
+            size_t pos = body.find(k);
+            if (pos == std::string::npos) return def;
+            pos = body.find_first_of("0123456789", pos + k.size());
+            if (pos == std::string::npos) return def;
+            return (uint32_t)std::stoul(body.substr(pos));
+        };
+
+        std::string driver = getStr("driver");
+        std::string device = getStr("device");
+        uint32_t sampleRate = getInt("sampleRate", 48000);
+        uint32_t bufferSize = getInt("bufferSize", 512);
+
+        if (driver.empty()) {
+            res.status = 400;
+            res.set_content("{\"error\":\"missing driver field\"}", "application/json");
+            return;
+        }
+
+        if (saveAudioConfigFile(driver, device, sampleRate, bufferSize)) {
+            res.set_content("{\"ok\":true,\"message\":\"Config saved. Restart Cardinal to apply.\"}", "application/json");
+        } else {
+            res.status = 500;
+            res.set_content("{\"error\":\"failed to save config file\"}", "application/json");
+        }
+    });
+
+    srv->WebSocket("/api/ws", [self](const httplib::Request& req, httplib::ws::WebSocket& ws) {
+        handle_ws(req, ws, self->httpPluginInstance);
+    });
+
+    srv->Get("/api/debug", [self](const httplib::Request&, httplib::Response& res) {
+        std::string json = "{";
+        json += "\"hasPlugin\":" + std::string(self->httpPluginInstance ? "true" : "false");
+        if (self->httpPluginInstance) {
+            CardinalPluginContext* ctx = self->httpPluginInstance->context;
+            json += ",\"hasContext\":" + std::string(ctx ? "true" : "false");
+            if (ctx) {
+                // Engine module count
+                if (ctx->engine) {
+                    rack::contextSet(ctx);
+                    auto ids = ctx->engine->getModuleIds();
+                    json += ",\"engineModuleCount\":" + std::to_string(ids.size());
+                    // Scene rack module count (UI side)
+                    size_t sceneCount = 0;
+                    if (ctx->scene && ctx->scene->rack) {
+                        auto widgets = ctx->scene->rack->getModules();
+                        sceneCount = widgets.size();
+                    }
+                    json += ",\"sceneModuleCount\":" + std::to_string(sceneCount);
+                    // Engine and context addresses for cross-checking
+                    char buf[64];
+                    snprintf(buf, sizeof(buf), "%p", static_cast<void*>(ctx));
+                    json += ",\"ctxAddr\":\"" + std::string(buf) + "\"";
+                    snprintf(buf, sizeof(buf), "%p", static_cast<void*>(ctx->engine));
+                    json += ",\"engineAddr\":\"" + std::string(buf) + "\"";
+                    json += ",\"autosavePath\":\"" + jsonEscape(ctx->patch->autosavePath) + "\"";
+                    json += ",\"sceneNull\":" + std::string(ctx->scene ? "false" : "true");
+                    rack::contextSet(nullptr);
+                }
+            }
+        }
+        json += ",\"runCallCount\":" + std::to_string(gRunCallCount.load());
+        json += ",\"flagSetCount\":" + std::to_string(gFlagSetCount.load());
+        json += ",\"flagDetectedCount\":" + std::to_string(gFlagDetectedCount.load());
+        json += ",\"pendingNow\":" + std::string(gPendingPatchLoad.load() ? "true" : "false");
+        json += ",\"pendingUI\":" + std::string(gPendingPatchFromUI.load() ? "true" : "false");
+        json += ",\"lastPatchLoad\":\"" + jsonEscape(gLastPatchLoadResult) + "\"";
+        json += ",\"systemDir\":\"" + jsonEscape(rack::asset::systemDir) + "\"";
+        json += ",\"bundlePath\":\"" + jsonEscape(rack::asset::bundlePath) + "\"";
+        json += ",\"pluginCount\":" + std::to_string(rack::plugin::plugins.size());
+        {
+            const std::string testPath = rack::system::join(rack::asset::bundlePath, "Fundamental.json");
+            json += ",\"fundamentalManifestPath\":\"" + jsonEscape(testPath) + "\"";
+            FILE* f1 = std::fopen(testPath.c_str(), "r");
+            json += ",\"fundamentalManifestOpen\":" + std::string(f1 ? "true" : "false");
+            if (f1) std::fclose(f1);
+            // Hard-coded path test (forward slashes only)
+            FILE* f2 = std::fopen("C:/Program Files/Common Files/VST3/Cardinal.vst3/Contents/Resources/PluginManifests/Fundamental.json", "r");
+            json += ",\"hardcodedPathOpen\":" + std::string(f2 ? "true" : "false");
+            if (f2) std::fclose(f2);
+            // Check errno
+            json += ",\"errno\":" + std::to_string(errno);
+        }
+        json += "}";
+        setCorsHeaders(res);
+        res.set_content(json, "application/json");
+    });
+
+    srv->Get("/api/plugins", [](const httplib::Request&, httplib::Response& res) {
+        std::string json = "[";
+        bool first = true;
+        for (rack::plugin::Plugin* p : rack::plugin::plugins) {
+            if (!first) json += ",";
+            first = false;
+            json += "{\"slug\":\"" + jsonEscape(p->slug) + "\""
+                  + ",\"models\":" + std::to_string(p->models.size()) + "}";
+        }
+        json += "]";
+        setCorsHeaders(res);
+        res.set_content(json, "application/json");
+    });
+
+    const int port = []() -> int {
+        const char* env = std::getenv("CARDINAL_HTTP_PORT");
+        return (env && *env) ? std::atoi(env) : kDefaultHttpPort;
+    }();
+
+    gHttpRunning.store(true);
+    gHttpThread = std::thread([srv, port]() {
+        srv->listen("127.0.0.1", port);
+    });
+
+    d_stdout("Cardinal HTTP server started on port %d", port);
+}
+
+void Initializer::stopHttpServer()
+{
+    if (!gHttpRunning.load())
+        return;
+
+    gHttpRunning.store(false);
+    if (gHttpServer)
+        gHttpServer->stop();
+    if (gHttpThread.joinable())
+        gHttpThread.join();
+    delete gHttpServer;
+    gHttpServer = nullptr;
+    d_stdout("Cardinal HTTP server stopped");
+}
+
+END_NAMESPACE_DISTRHO
+
+#endif // CARDINAL_ACCESSIBLE_HTTP

@@ -303,18 +303,31 @@ public:
         if (! isDummyInstance())
             context->window = new rack::window::Window;
 
-       #ifdef DISTRHO_OS_WASM
-        if ((rack::patchStorageSlug = getPatchStorageSlug()) == nullptr &&
-            (rack::patchRemoteURL = getPatchRemoteURL()) == nullptr &&
-            (rack::patchFromURL = getPatchFileEncodedInURL()) == nullptr)
-       #endif
+        // Dummy/scan instances skip heavy plugin loading and template loading.
+        // ensurePluginsLoaded() is a no-op if already called (e.g. by a previous real instance).
+        if (! isDummyInstance())
         {
-            context->patch->loadTemplate();
-            context->scene->rackScroll->reset();
+            fInitializer->ensurePluginsLoaded();
+
+           #ifdef DISTRHO_OS_WASM
+            if ((rack::patchStorageSlug = getPatchStorageSlug()) == nullptr &&
+                (rack::patchRemoteURL = getPatchRemoteURL()) == nullptr &&
+                (rack::patchFromURL = getPatchFileEncodedInURL()) == nullptr)
+           #endif
+            {
+                context->patch->loadTemplate();
+                context->scene->rackScroll->reset();
+            }
         }
 
        #ifdef CARDINAL_INIT_OSC_THREAD
         fInitializer->remotePluginInstance = this;
+       #endif
+       #ifdef CARDINAL_ACCESSIBLE_HTTP
+        if (! isDummyInstance()) {
+            fInitializer->httpPluginInstance = this;
+            fInitializer->startHttpServer();
+        }
        #endif
     }
 
@@ -323,6 +336,12 @@ public:
        #ifdef HAVE_LIBLO
         if (fInitializer->remotePluginInstance == this)
             fInitializer->remotePluginInstance = nullptr;
+       #endif
+       #ifdef CARDINAL_ACCESSIBLE_HTTP
+        if (fInitializer->httpPluginInstance == this) {
+            fInitializer->stopHttpServer();
+            fInitializer->httpPluginInstance = nullptr;
+        }
        #endif
 
         {
@@ -1174,6 +1193,13 @@ protected:
         const ScopedDenormalDisable sdd;
 
         rack::contextSet(context);
+
+       #ifdef CARDINAL_ACCESSIBLE_HTTP
+        // Keep httpPluginInstance pointing to the instance that is actually processing audio.
+        // This guarantees we never point to a dummy or stale instance.
+        fInitializer->httpPluginInstance = this;
+        fInitializer->processPendingHttpRequests(fAutosavePath, context);
+       #endif
 
         const bool bypassed = context->bypassed;
 
