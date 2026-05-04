@@ -1,13 +1,13 @@
 #!/usr/bin/make -f
-# Makefile — CardinalAccessibleUI (Strada 2)
+# Makefile — PostmodularAccessibleUI (Strada 2)
 #
 # Uso in WSL (dopo aver installato wxWidgets con ~/wx-src/build-wx.sh):
 #   cd ~/Cardinal/src/CardinalAccessibleUI
 #   make
 #
-# Output: CardinalAccessibleUI.exe (da copiare accanto a CardinalNative.exe)
+# Output: PostmodularAccessibleUI.exe (da copiare accanto a PostmodularNative.exe)
 
-NAME     = CardinalAccessibleUI
+NAME     = PostmodularAccessibleUI
 CXX      = x86_64-w64-mingw32-g++
 WINDRES  = x86_64-w64-mingw32-windres
 
@@ -30,14 +30,18 @@ INCS  = -I../extra      # httplib.h
 INCS += -I.             # json.hpp
 
 # Source is edited on the Windows side; sync it here before building.
-WIN_SRC = /mnt/c/Users/Luca\ Casarotti/Documents/Cardinal/src/CardinalAccessibleUI/CardinalAccessibleUI.cpp
-SRCS = CardinalAccessibleUI.cpp
+WIN_SRC = /mnt/c/Users/Luca\ Casarotti/Documents/Cardinal/src/CardinalAccessibleUI/PostmodularAccessibleUI.cpp
+SRCS = PostmodularAccessibleUI.cpp
 OBJS = $(SRCS:.cpp=.o)
 
-all: sync $(NAME).exe
+all: $(NAME).exe
 
-sync:
-	cp $(WIN_SRC) CardinalAccessibleUI.cpp
+# Sync from Windows side: teach Make that PostmodularAccessibleUI.cpp comes from WIN_SRC.
+# This way 'make' always works even after 'make clean'.
+PostmodularAccessibleUI.cpp: $(WIN_SRC)
+	cp $(WIN_SRC) PostmodularAccessibleUI.cpp
+
+sync: PostmodularAccessibleUI.cpp
 
 $(NAME).exe: $(OBJS)
 	$(CXX) -mwindows -static-libgcc -static-libstdc++ -o $@ $^ $(WX_LIBS) $(EXTRA_LIBS)
@@ -49,3 +53,4 @@ clean:
 	rm -f $(OBJS) $(NAME).exe
 
 .PHONY: all sync clean
+

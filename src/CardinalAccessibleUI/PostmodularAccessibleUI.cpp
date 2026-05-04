@@ -1,7 +1,7 @@
 /*
- * Cardinal Accessible UI - Strada 2
+ * Postmodular UI - Strada 2
  *
- * wxWidgets app that starts CardinalNative.exe --hidden and provides a
+ * wxWidgets app that starts PostmodularNative.exe --hidden and provides a
  * screen-reader-friendly interface with the same features as the Python
  * companion app.
  *
@@ -135,7 +135,7 @@ static const std::initializer_list<std::pair<const char*, const char*>> kItalian
     {"Reset (Home)",                              "Reset (Home)"},
     {"[encoder]",                                 "[encoder]"},
     {"%d modules loaded.",                        "%d moduli caricati."},
-    {"Error: cannot reach Cardinal.",             "Errore: impossibile raggiungere Cardinal."},
+    {"Error: cannot reach Postmodular.",             "Errore: impossibile raggiungere Postmodular."},
     {"Module removal error.",                     "Errore nella rimozione del modulo."},
     {"Module removed.",                           "Modulo rimosso."},
     {"reset to",                                    "ripristinato a"},
@@ -176,9 +176,9 @@ static const std::initializer_list<std::pair<const char*, const char*>> kItalian
     {"Added: ",                                   "Aggiunto: "},
     {"Module add error.",                         "Errore nell'aggiunta del modulo."},
     {"modules_db.json not found. "
-     "Copy it to C:\\Program Files\\Cardinal\\.",
+     "Copy it to C:\\Program Files\\Postmodular\\.",
      "modules_db.json non trovato. "
-     "Copiarlo in C:\\Program Files\\Cardinal\\."},
+     "Copiarlo in C:\\Program Files\\Postmodular\\."},
     // AudioPanel
     {"Audio settings:",                           "Impostazioni audio:"},
     {"Driver:",                                   "Driver:"},
@@ -188,7 +188,7 @@ static const std::initializer_list<std::pair<const char*, const char*>> kItalian
     {"Read current configuration",                "Leggi configurazione attuale"},
     {"Save settings",                             "Salva impostazioni"},
     {"Restart DSP",                               "Riavvia DSP"},
-    {"Cardinal not reachable.",                   "Cardinal non raggiungibile."},
+    {"Postmodular not reachable.",                   "Postmodular non raggiungibile."},
     {"Configuration loaded.",                     "Configurazione caricata."},
     {"No device selected.",                       "Nessun dispositivo selezionato."},
     {"Saved.",                                    "Salvato."},
@@ -213,29 +213,29 @@ static const std::initializer_list<std::pair<const char*, const char*>> kItalian
     // Language switch message (shown bilingual intentionally)
     {"language_restart_title",                    "language_restart_title"},
     // Status bar / dialogs
-    {"Connecting to Cardinal...",                 "Connessione a Cardinal in corso..."},
-    {"Connected to Cardinal.",                    "Connesso a Cardinal."},
-    {"Cardinal not responding - retrying...",     "Cardinal non risponde - riprovo..."},
+    {"Connecting to Postmodular...",                 "Connessione a Postmodular in corso..."},
+    {"Connected to Postmodular.",                    "Connesso a Postmodular."},
+    {"Postmodular not responding - retrying...",     "Postmodular non risponde - riprovo..."},
     {"New patch created.",                        "Nuovo patch creato."},
     {"Patch loaded: ",                            "Patch caricata: "},
     {"Patch load error.",                         "Errore nel caricamento della patch."},
-    {"Cannot retrieve patch from Cardinal.",      "Impossibile recuperare la patch da Cardinal."},
+    {"Cannot retrieve patch from Postmodular.",      "Impossibile recuperare la patch da Postmodular."},
     {"Cannot open file for writing.",             "Impossibile aprire il file per la scrittura."},
     {"Patch saved: ",                             "Patch salvata: "},
     // File dialogs
-    {"Open Cardinal patch",                       "Apri patch Cardinal"},
-    {"Save Cardinal patch",                       "Salva patch Cardinal"},
-    {"Cardinal patches (*.vcv)|*.vcv|All files (*.*)|*.*",
-     "Patch Cardinal (*.vcv)|*.vcv|Tutti i file (*.*)|*.*"},
-    {"Cardinal patches (*.vcv)|*.vcv",            "Patch Cardinal (*.vcv)|*.vcv"},
+    {"Open Postmodular patch",                       "Apri patch Postmodular"},
+    {"Save Postmodular patch",                       "Salva patch Postmodular"},
+    {"Postmodular patches (*.vcv)|*.vcv|All files (*.*)|*.*",
+     "Patch Postmodular (*.vcv)|*.vcv|Tutti i file (*.*)|*.*"},
+    {"Postmodular patches (*.vcv)|*.vcv",            "Patch Postmodular (*.vcv)|*.vcv"},
     // Engine startup error
-    {"CardinalNative.exe not found.\n\n"
-     "Install Cardinal in C:\\Program Files\\Cardinal\\\n"
-     "or place CardinalNative.exe in the same folder as this executable.",
-     "CardinalNative.exe non trovato.\n\n"
-     "Installa Cardinal in C:\\Program Files\\Cardinal\\\n"
-     "oppure metti CardinalNative.exe nella stessa cartella di questo eseguibile."},
-    {"Cardinal Accessible - Startup Error",       "Cardinal Accessible - Errore avvio"},
+    {"PostmodularNative.exe not found.\n\n"
+     "Install Postmodular in C:\\Program Files\\Postmodular\\\n"
+     "or place PostmodularNative.exe in the same folder as this executable.",
+     "PostmodularNative.exe non trovato.\n\n"
+     "Installa Postmodular in C:\\Program Files\\Postmodular\\\n"
+     "oppure metti PostmodularNative.exe nella stessa cartella di questo eseguibile."},
+    {"Postmodular - Startup Error",       "Postmodular - Errore avvio"},
 };
 
 static wxString tr(const char* key)
@@ -718,7 +718,7 @@ public:
     {
         auto result = http_get_json("/api/modules");
         if (!result) {
-            set_status(tr("Error: cannot reach Cardinal."));
+            set_status(tr("Error: cannot reach Postmodular."));
             return;
         }
         m_modules.clear();
@@ -1478,7 +1478,7 @@ private:
 
         if (m_all.empty()) {
             m_status->SetLabel(tr("modules_db.json not found. "
-                "Copy it to C:\\Program Files\\Cardinal\\."));
+                "Copy it to C:\\Program Files\\Postmodular\\."));
             return;
         }
 
@@ -1645,7 +1645,7 @@ private:
     void load_config()
     {
         auto cfg = http_get_json("/api/audio/config");
-        if (!cfg) { m_status->SetLabel(tr("Cardinal not reachable.")); return; }
+        if (!cfg) { m_status->SetLabel(tr("Postmodular not reachable.")); return; }
 
         m_driver->SetSelection(cfg->value("driver", "wasapi") == "asio" ? 1 : 0);
 
@@ -1746,16 +1746,16 @@ static long       gEnginePid     = 0;
 
 static bool start_engine()
 {
-    wxString candidate = g_exedir + wxFILE_SEP_PATH + "CardinalNative.exe";
+    wxString candidate = g_exedir + wxFILE_SEP_PATH + "PostmodularNative.exe";
     if (!wxFileExists(candidate))
-        candidate = "C:\\Program Files\\Cardinal\\CardinalNative.exe";
+        candidate = "C:\\Program Files\\Postmodular\\PostmodularNative.exe";
 
     if (!wxFileExists(candidate)) {
         wxMessageBox(
-            tr("CardinalNative.exe not found.\n\n"
-               "Install Cardinal in C:\\Program Files\\Cardinal\\\n"
-               "or place CardinalNative.exe in the same folder as this executable."),
-            tr("Cardinal Accessible - Startup Error"),
+            tr("PostmodularNative.exe not found.\n\n"
+               "Install Postmodular in C:\\Program Files\\Postmodular\\\n"
+               "or place PostmodularNative.exe in the same folder as this executable."),
+            tr("Postmodular - Startup Error"),
             wxOK | wxICON_ERROR);
         return false;
     }
@@ -1780,7 +1780,7 @@ static void stop_engine()
 class MainFrame : public wxFrame
 {
 public:
-    MainFrame() : wxFrame(nullptr, wxID_ANY, "Cardinal Accessible",
+    MainFrame() : wxFrame(nullptr, wxID_ANY, "Postmodular",
                           wxDefaultPosition, wxSize(900, 680))
     {
         // ── Menu bar ──────────────────────────────────────────────────────────
@@ -1840,7 +1840,7 @@ public:
 
         CreateStatusBar(2);
         { int w[] = {-1, 80}; GetStatusBar()->SetStatusWidths(2, w); }
-        announce(tr("Connecting to Cardinal..."));
+        announce(tr("Connecting to Postmodular..."));
 
         // ── Tab accelerators Ctrl+1..4 ────────────────────────────────────────
         wxAcceleratorEntry acc[4];
@@ -1911,8 +1911,8 @@ private:
 
     void open_patch()
     {
-        wxFileDialog dlg(this, tr("Open Cardinal patch"), "", "",
-                         tr("Cardinal patches (*.vcv)|*.vcv|All files (*.*)|*.*"),
+        wxFileDialog dlg(this, tr("Open Postmodular patch"), "", "",
+                         tr("Postmodular patches (*.vcv)|*.vcv|All files (*.*)|*.*"),
                          wxFD_OPEN | wxFD_FILE_MUST_EXIST);
         if (dlg.ShowModal() == wxID_CANCEL) return;
         json body = {{"path", dlg.GetPath().utf8_string()}};
@@ -1927,10 +1927,10 @@ private:
     void save_patch()
     {
         auto result = http_get_json("/api/patch");
-        if (!result) { announce(tr("Cannot retrieve patch from Cardinal.")); return; }
+        if (!result) { announce(tr("Cannot retrieve patch from Postmodular.")); return; }
 
-        wxFileDialog dlg(this, tr("Save Cardinal patch"), "", "patch.vcv",
-                         tr("Cardinal patches (*.vcv)|*.vcv"),
+        wxFileDialog dlg(this, tr("Save Postmodular patch"), "", "patch.vcv",
+                         tr("Postmodular patches (*.vcv)|*.vcv"),
                          wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
         if (dlg.ShowModal() == wxID_CANCEL) return;
 
@@ -1951,11 +1951,11 @@ private:
     {
         auto res = http().Get("/api/modules");
         if (!res || res->status != 200) {
-            announce(tr("Cardinal not responding - retrying..."));
+            announce(tr("Postmodular not responding - retrying..."));
             m_connect_timer.StartOnce(1500);
             return;
         }
-        announce(tr("Connected to Cardinal."));
+        announce(tr("Connected to Postmodular."));
         refresh_all();
         start_ws();
     }
@@ -2007,13 +2007,13 @@ private:
 
 // ── App ───────────────────────────────────────────────────────────────────────
 
-class CardinalAccessibleApp : public wxApp
+class PostmodularAccessibleApp : public wxApp
 {
 public:
     bool OnInit() override
     {
-        SetVendorName("Cardinal");
-        SetAppName("CardinalAccessibleUI");
+        SetVendorName("Postmodular");
+        SetAppName("PostmodularAccessibleUI");
 
         g_exedir = wxFileName(wxStandardPaths::Get().GetExecutablePath()).GetPath();
         load_catalog();
@@ -2041,4 +2041,4 @@ public:
     }
 };
 
-wxIMPLEMENT_APP(CardinalAccessibleApp);
+wxIMPLEMENT_APP(PostmodularAccessibleApp);
