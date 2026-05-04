@@ -1221,6 +1221,10 @@ private:
             mi.displayName = m.value("name", mi.model);
             m_modules.push_back(mi);
         }
+        std::sort(m_modules.begin(), m_modules.end(),
+                  [](const ModuleInfo& a, const ModuleInfo& b) {
+                      return a.displayName < b.displayName;
+                  });
 
         int new_from = 0, new_to = 0;
         for (int i = 0; i < (int)m_modules.size(); ++i) {
@@ -1228,26 +1232,19 @@ private:
             if (m_modules[i].id == to_id)   new_to   = i;
         }
 
-        // After Thaw, fire EVENT_OBJECT_VALUECHANGE so NVDA discards its stale UIA
-        // selection cache (built up by CB_ADDSTRING events during Freeze) and
-        // re-reads CB_GETCURSEL, which correctly returns `sel`.
-        auto fill_choice = [&](wxChoice* ch, int sel) {
+        auto fill_ch = [&](wxChoice* ch, int sel) {
             ch->Freeze();
             ch->Clear();
             for (auto& mi : m_modules)
                 ch->Append(wxString::FromUTF8(mi.displayName + " (" + mi.plugin + ")"));
             if (!m_modules.empty()) ch->SetSelection(sel);
             ch->Thaw();
-            if (!m_modules.empty()) {
-                HWND hwnd = (HWND)ch->GetHandle();
-                ::NotifyWinEvent(EVENT_OBJECT_VALUECHANGE, hwnd, OBJID_CLIENT, CHILDID_SELF);
-            }
         };
 
-        fill_choice(m_from_mod, new_from);
+        fill_ch(m_from_mod, new_from);
         on_from_mod_changed();
 
-        fill_choice(m_to_mod, new_to);
+        fill_ch(m_to_mod, new_to);
         on_to_mod_changed();
     }
 
