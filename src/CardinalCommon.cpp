@@ -1294,6 +1294,11 @@ void async_dialog_text_input(const char* const message, const char* const text,
 
 #include "extra/httplib.h"
 
+#ifdef _WIN32
+# include <windows.h>
+# include <shellapi.h>
+#endif
+
 #include "rack.hpp"
 #include "engine/Engine.hpp"
 #include "plugin.hpp"
@@ -2620,6 +2625,22 @@ void Initializer::startHttpServer()
     });
 
     d_stdout("Cardinal HTTP server started on port %d", port);
+
+#if defined(_WIN32) && !defined(DISTRHO_PLUGIN_TARGET_JACK)
+    // Auto-launch the accessible companion UI if it is not already open.
+    // Only for VST3/CLAP: in standalone mode PostmodularAccessibleUI spawns the engine, not the other way around.
+    if (FindWindowW(nullptr, L"Postmodular Accessible") == nullptr)
+    {
+        const intptr_t result = (intptr_t)ShellExecuteW(
+            nullptr, L"open",
+            L"C:\\Program Files\\Postmodular\\PostmodularAccessibleUI.exe",
+            nullptr, nullptr, SW_SHOWNORMAL);
+        if (result > 32)
+            d_stdout("PostmodularAccessibleUI launched");
+        else
+            d_stdout("Failed to launch PostmodularAccessibleUI (ShellExecuteW=%ld)", (long)result);
+    }
+#endif
 }
 
 void Initializer::stopHttpServer()
