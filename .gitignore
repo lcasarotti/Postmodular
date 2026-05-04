@@ -26,3 +26,5 @@ compile_commands.json
 /src/CardinalNative/resources/
 /utils/inno/resources.iss
 /utils/inno/version.iss
+/utils/inno/*.exe
+/dist/

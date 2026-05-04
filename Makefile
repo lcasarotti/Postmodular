@@ -471,3 +471,28 @@ version:
 # --------------------------------------------------------------
 
 .PHONY: carla deps plugins
+
+# --------------------------------------------------------------
+# Postmodular Windows distribution staging
+# Usage: make dist  (after building vst3, clap, native)
+# Then from Windows PowerShell: run ISCC on utils/inno/postmodular.iss
+
+WINDOWS_USER_DIR := /mnt/c/Users/Luca Casarotti/Documents
+DIST_DIR         := $(WINDOWS_USER_DIR)/cardinal/dist
+COMPANION_DIR    := $(WINDOWS_USER_DIR)/cardinal-accessible-wx
+
+dist:
+	mkdir -p "$(DIST_DIR)/vst3" "$(DIST_DIR)/resources" "$(DIST_DIR)/clap" "$(DIST_DIR)/native" "$(DIST_DIR)/gui" "$(DIST_DIR)/data"
+	cp -f  bin/Cardinal.vst3/Contents/x86_64-win/Cardinal.vst3 "$(DIST_DIR)/vst3/"
+	cp -rL bin/Cardinal.vst3/Contents/Resources/.              "$(DIST_DIR)/resources/"
+	cp -f  bin/Cardinal.clap/CardinalFX.clap                   "$(DIST_DIR)/clap/"
+	cp -f  bin/Cardinal.clap/CardinalSynth.clap                "$(DIST_DIR)/clap/"
+	cp -f  bin/CardinalNative.exe                              "$(DIST_DIR)/native/PostmodularNative.exe"
+	cp -f  src/CardinalAccessibleUI/PostmodularAccessibleUI.exe "$(DIST_DIR)/gui/"
+	cp -f  "$(COMPANION_DIR)/catalog.json"                     "$(DIST_DIR)/data/"
+	cp -f  "$(COMPANION_DIR)/modules_db.json"                  "$(DIST_DIR)/data/"
+	@echo ""
+	@echo "=== Dist staged. Ora da Windows PowerShell: ==="
+	@echo "=== & 'C:\\Program Files (x86)\\Inno Setup 6\\ISCC.exe' 'C:\\Users\\Luca Casarotti\\Documents\\cardinal\\utils\\inno\\postmodular.iss' ==="
+
+.PHONY: dist
