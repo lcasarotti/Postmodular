@@ -55,6 +55,10 @@ it.CompNative=Motore standalone
 en.RunUI=Launch Postmodular Accessible UI
 it.RunUI=Avvia Postmodular Accessible UI
 
+; --- Desktop shortcut ---
+en.DesktopIcon=Create desktop shortcut for Postmodular Standalone
+it.DesktopIcon=Crea icona sul desktop per Postmodular Standalone
+
 ; --- Start Menu shortcut comment ---
 en.ShortcutComment=Postmodular — accessible interface for modular synthesizer
 it.ShortcutComment=Postmodular — interfaccia accessibile per sintetizzatore modulare
@@ -99,12 +103,21 @@ Source: "{#DistDir}\resources\PluginManifests\*"; \
     DestDir: "{commoncf64}\Postmodular\PluginManifests"; Components: clap; \
     Flags: recursesubdirs createallsubdirs ignoreversion;
 
+[Tasks]
+Name: desktopicon; Description: "{cm:DesktopIcon}"; Components: native;
+
 [Icons]
 Name: "{commonprograms}\{#MyAppName}"; \
     Filename: "{commonpf64}\Postmodular\PostmodularAccessibleUI.exe"; \
     IconFilename: "{commonpf64}\Postmodular\PostmodularAccessibleUI.exe"; \
     WorkingDir: "{commonpf64}\Postmodular"; \
     Comment: "{cm:ShortcutComment}";
+Name: "{commondesktop}\{#MyAppName}"; \
+    Filename: "{commonpf64}\Postmodular\PostmodularAccessibleUI.exe"; \
+    IconFilename: "{commonpf64}\Postmodular\PostmodularAccessibleUI.exe"; \
+    WorkingDir: "{commonpf64}\Postmodular"; \
+    Comment: "{cm:ShortcutComment}"; \
+    Tasks: desktopicon; Components: native;
 
 [Run]
 Filename: "{commonpf64}\Postmodular\PostmodularAccessibleUI.exe"; \

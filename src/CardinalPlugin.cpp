@@ -421,7 +421,7 @@ protected:
 
     const char* getMaker() const override
     {
-        return "DISTRHO";
+        return "Luca Casarotti";
     }
 
     const char* getHomePage() const override
