@@ -24,19 +24,53 @@ SolidCompression=yes
 SetupIconFile=..\..\utils\distrho.ico
 UninstallDisplayName={#MyAppName}
 UninstallDisplayIcon={commonpf64}\Postmodular\PostmodularAccessibleUI.exe
+ShowLanguageDialog=yes
+
+[Languages]
+Name: "en"; MessagesFile: "compiler:Default.isl";
+Name: "it"; MessagesFile: "compiler:Languages\Italian.isl";
+
+[CustomMessages]
+; --- Installation types ---
+en.TypeFull=Full installation (VST3 + CLAP + Standalone + UI)
+it.TypeFull=Installazione completa (VST3 + CLAP + Standalone + UI)
+en.TypeVst=VST3 plugin + UI only
+it.TypeVst=Solo plugin VST3 + UI
+en.TypeStandalone=Standalone + UI only
+it.TypeStandalone=Solo Standalone + UI
+en.TypeCustom=Custom
+it.TypeCustom=Personalizzata
+
+; --- Component descriptions ---
+en.CompUI=Postmodular Accessible UI
+it.CompUI=Interfaccia accessibile Postmodular
+en.CompVST3=VST3 plugin
+it.CompVST3=Plugin VST3
+en.CompCLAP=CLAP plugins (FX + Synth)
+it.CompCLAP=Plugin CLAP (FX + Synth)
+en.CompNative=Standalone engine
+it.CompNative=Motore standalone
+
+; --- Post-install run checkbox ---
+en.RunUI=Launch Postmodular Accessible UI
+it.RunUI=Avvia Postmodular Accessible UI
+
+; --- Start Menu shortcut comment ---
+en.ShortcutComment=Postmodular — accessible interface for modular synthesizer
+it.ShortcutComment=Postmodular — interfaccia accessibile per sintetizzatore modulare
 
 [Types]
-Name: "full";       Description: "Installazione completa (VST3 + CLAP + Standalone + UI)";
-Name: "vst";        Description: "Solo plugin VST3 + UI";
-Name: "standalone"; Description: "Solo Standalone + UI";
-Name: "custom";     Description: "Personalizzata"; Flags: iscustom;
+Name: "full";       Description: "{cm:TypeFull}";
+Name: "vst";        Description: "{cm:TypeVst}";
+Name: "standalone"; Description: "{cm:TypeStandalone}";
+Name: "custom";     Description: "{cm:TypeCustom}"; Flags: iscustom;
 
 [Components]
 ; UI is fixed — installed with every configuration
-Name: ui;     Description: "Postmodular Accessible UI";   Types: full vst standalone custom; Flags: fixed;
-Name: vst3;   Description: "Plugin VST3";                 Types: full vst custom;
-Name: clap;   Description: "Plugin CLAP (FX + Synth)";   Types: full custom;
-Name: native; Description: "Motore standalone";           Types: full standalone custom;
+Name: ui;     Description: "{cm:CompUI}";    Types: full vst standalone custom; Flags: fixed;
+Name: vst3;   Description: "{cm:CompVST3}";  Types: full vst custom;
+Name: clap;   Description: "{cm:CompCLAP}";  Types: full custom;
+Name: native; Description: "{cm:CompNative}"; Types: full standalone custom;
 
 [Files]
 ; --- UI (always) ---
@@ -70,11 +104,10 @@ Name: "{commonprograms}\{#MyAppName}"; \
     Filename: "{commonpf64}\Postmodular\PostmodularAccessibleUI.exe"; \
     IconFilename: "{commonpf64}\Postmodular\PostmodularAccessibleUI.exe"; \
     WorkingDir: "{commonpf64}\Postmodular"; \
-    Comment: "Postmodular — interfaccia accessibile per sintetizzatore modulare";
+    Comment: "{cm:ShortcutComment}";
 
 [Run]
-; Offer to launch the UI immediately after install
 Filename: "{commonpf64}\Postmodular\PostmodularAccessibleUI.exe"; \
-    Description: "Avvia Postmodular Accessible UI"; \
+    Description: "{cm:RunUI}"; \
     Flags: nowait postinstall skipifsilent; \
     Components: ui;
