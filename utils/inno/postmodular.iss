@@ -84,19 +84,19 @@ Source: "{#DistDir}\resources\*"; DestDir: "{commonpf64}\Postmodular\resources";
     Flags: recursesubdirs createallsubdirs ignoreversion;
 
 ; --- VST3 DLL + risorse nel bundle ---
-Source: "{#DistDir}\vst3\Cardinal.vst3"; \
-    DestDir: "{commoncf64}\VST3\Cardinal.vst3\Contents\x86_64-win"; Components: vst3; Flags: ignoreversion;
+Source: "{#DistDir}\vst3\Postmodular.vst3"; \
+    DestDir: "{commoncf64}\VST3\Postmodular.vst3\Contents\x86_64-win"; Components: vst3; Flags: ignoreversion;
 Source: "{#DistDir}\resources\*"; \
-    DestDir: "{commoncf64}\VST3\Cardinal.vst3\Contents\Resources"; Components: vst3; \
+    DestDir: "{commoncf64}\VST3\Postmodular.vst3\Contents\Resources"; Components: vst3; \
     Flags: recursesubdirs createallsubdirs ignoreversion;
 
 ; --- CLAP DLLs ---
-Source: "{#DistDir}\clap\CardinalFX.clap";    DestDir: "{commoncf64}\CLAP"; Components: clap; Flags: ignoreversion;
-Source: "{#DistDir}\clap\CardinalSynth.clap"; DestDir: "{commoncf64}\CLAP"; Components: clap; Flags: ignoreversion;
+Source: "{#DistDir}\clap\PostmodularFX.clap";    DestDir: "{commoncf64}\CLAP"; Components: clap; Flags: ignoreversion;
+Source: "{#DistDir}\clap\PostmodularSynth.clap"; DestDir: "{commoncf64}\CLAP"; Components: clap; Flags: ignoreversion;
 
 ; --- CLAP: PluginManifests nel percorso di fallback ---
 Source: "{#DistDir}\resources\PluginManifests\*"; \
-    DestDir: "{commoncf64}\Cardinal\PluginManifests"; Components: clap; \
+    DestDir: "{commoncf64}\Postmodular\PluginManifests"; Components: clap; \
     Flags: recursesubdirs createallsubdirs ignoreversion;
 
 [Icons]

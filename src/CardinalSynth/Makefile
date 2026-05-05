@@ -4,6 +4,6 @@
 # Created by falkTX
 #
 
-NAME = CardinalSynth
+NAME = PostmodularSynth
 CARDINAL_VARIANT = synth
 include ../Makefile.cardinal.mk

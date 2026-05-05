@@ -4,6 +4,6 @@
 # Created by falkTX
 #
 
-NAME = CardinalFX
+NAME = PostmodularFX
 CARDINAL_VARIANT = fx
 include ../Makefile.cardinal.mk

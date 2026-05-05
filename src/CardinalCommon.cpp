@@ -621,7 +621,7 @@ Initializer::Initializer(const CardinalBasePlugin* const plugin, const CardinalB
                #elif defined(ARCH_MAC)
                 asset::systemDir = "/Library/Application Support/Cardinal";
                #elif defined(ARCH_WIN)
-                asset::systemDir = system::join(getSpecialPath(kSpecialPathCommonProgramFiles), "Cardinal");
+                asset::systemDir = system::join(getSpecialPath(kSpecialPathCommonProgramFiles), "Postmodular");
                #else
                 asset::systemDir = CARDINAL_PLUGIN_PREFIX "/share/cardinal";
                #endif
@@ -2589,7 +2589,7 @@ void Initializer::startHttpServer()
             json += ",\"fundamentalManifestOpen\":" + std::string(f1 ? "true" : "false");
             if (f1) std::fclose(f1);
             // Hard-coded path test (forward slashes only)
-            FILE* f2 = std::fopen("C:/Program Files/Common Files/VST3/Cardinal.vst3/Contents/Resources/PluginManifests/Fundamental.json", "r");
+            FILE* f2 = std::fopen("C:/Program Files/Common Files/VST3/Postmodular.vst3/Contents/Resources/PluginManifests/Fundamental.json", "r");
             json += ",\"hardcodedPathOpen\":" + std::string(f2 ? "true" : "false");
             if (f2) std::fclose(f2);
             // Check errno

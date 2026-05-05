@@ -29,11 +29,11 @@
 #define CARDINAL_NUM_AUDIO_OUTPUTS 2
 #define CARDINAL_NUM_PARAMETERS    24
 
-#define DISTRHO_PLUGIN_BRAND   "DISTRHO"
-#define DISTRHO_PLUGIN_NAME    "Cardinal Synth"
-#define DISTRHO_PLUGIN_LABEL   "CardinalSynth"
-#define DISTRHO_PLUGIN_URI     "https://distrho.kx.studio/plugins/cardinal#synth"
-#define DISTRHO_PLUGIN_CLAP_ID "studio.kx.distrho.cardinal#synth"
+#define DISTRHO_PLUGIN_BRAND   "Postmodular"
+#define DISTRHO_PLUGIN_NAME    "Postmodular Synth"
+#define DISTRHO_PLUGIN_LABEL   "PostmodularSynth"
+#define DISTRHO_PLUGIN_URI     "https://github.com/lcasarotti/Postmodular/plugins/postmodular#synth"
+#define DISTRHO_PLUGIN_CLAP_ID "io.github.lcasarotti.postmodular#synth"
 
 #define DISTRHO_PLUGIN_AU_TYPE   aumu
 #define DISTRHO_PLUGIN_BRAND_ID  Dstr

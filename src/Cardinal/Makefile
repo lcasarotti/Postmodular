@@ -4,6 +4,6 @@
 # Created by falkTX
 #
 
-NAME = Cardinal
+NAME = Postmodular
 CARDINAL_VARIANT = main
 include ../Makefile.cardinal.mk
