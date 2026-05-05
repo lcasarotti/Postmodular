@@ -483,10 +483,10 @@ COMPANION_DIR    := $(WINDOWS_USER_DIR)/cardinal-accessible-wx
 
 dist:
 	mkdir -p "$(DIST_DIR)/vst3" "$(DIST_DIR)/resources" "$(DIST_DIR)/clap" "$(DIST_DIR)/native" "$(DIST_DIR)/gui" "$(DIST_DIR)/data"
-	cp -f  bin/Cardinal.vst3/Contents/x86_64-win/Cardinal.vst3    "$(DIST_DIR)/vst3/Postmodular.vst3"
-	cp -rL bin/Cardinal.vst3/Contents/Resources/.                 "$(DIST_DIR)/resources/"
-	cp -f  bin/Cardinal.clap/CardinalFX.clap                      "$(DIST_DIR)/clap/PostmodularFX.clap"
-	cp -f  bin/Cardinal.clap/CardinalSynth.clap                   "$(DIST_DIR)/clap/PostmodularSynth.clap"
+	cp -f  bin/Postmodular.vst3/Contents/x86_64-win/Postmodular.vst3 "$(DIST_DIR)/vst3/Postmodular.vst3"
+	cp -rL bin/Postmodular.vst3/Contents/Resources/.                 "$(DIST_DIR)/resources/"
+	cp -f  bin/Cardinal.clap/PostmodularFX.clap                      "$(DIST_DIR)/clap/PostmodularFX.clap"
+	cp -f  bin/Cardinal.clap/PostmodularSynth.clap                   "$(DIST_DIR)/clap/PostmodularSynth.clap"
 	cp -f  bin/CardinalNative.exe                              "$(DIST_DIR)/native/PostmodularNative.exe"
 	cp -f  src/CardinalAccessibleUI/PostmodularAccessibleUI.exe "$(DIST_DIR)/gui/"
 	cp -f  "$(COMPANION_DIR)/catalog.json"                     "$(DIST_DIR)/data/"
