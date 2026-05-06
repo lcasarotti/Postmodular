@@ -60,7 +60,8 @@ static const int    ID_SILENT_REFRESH = 12000;
 
 // ── globals ───────────────────────────────────────────────────────────────────
 
-static wxString g_exedir;  // set in OnInit
+static wxString g_exedir;   // set in OnInit
+static bool     g_vst_mode = false; // true when launched by VST3/CLAP (engine runs inside DAW)
 
 // Visual status label (wxStaticText at the bottom of the frame).
 // Keeps the last message visible. Set in MainFrame.
@@ -1719,6 +1720,12 @@ private:
 
     void do_restart()
     {
+        if (g_vst_mode) {
+            // In VST mode the engine runs inside the DAW — restart via DSP is not available.
+            m_status->SetLabel("DSP restart not available in VST mode.");
+            announce("DSP restart not available in VST mode.");
+            return;
+        }
         // Save current settings first, then restart the engine
         save_config();
         m_status->SetLabel(tr("Restarting DSP..."));
@@ -2033,6 +2040,12 @@ public:
         SetAppName("PostmodularAccessibleUI");
 
         g_exedir = wxFileName(wxStandardPaths::Get().GetExecutablePath()).GetPath();
+
+        for (int i = 1; i < argc; ++i) {
+            if (wxString(argv[i]) == "--vst-mode")
+                g_vst_mode = true;
+        }
+
         load_catalog();
 
         // Load saved language, default English
@@ -2044,7 +2057,7 @@ public:
         scan_languages();
         apply_language(lang_code);
 
-        if (!start_engine()) return false;
+        if (!g_vst_mode && !start_engine()) return false;
         new MainFrame();
         // init_nvda_client() after MainFrame so nvdaHelperRemote.dll is injected
         init_nvda_client();
@@ -2053,7 +2066,8 @@ public:
 
     int OnExit() override
     {
-        stop_engine();
+        if (!g_vst_mode)
+            stop_engine();
         return 0;
     }
 };

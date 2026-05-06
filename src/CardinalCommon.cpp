@@ -2634,7 +2634,7 @@ void Initializer::startHttpServer()
         const intptr_t result = (intptr_t)ShellExecuteW(
             nullptr, L"open",
             L"C:\\Program Files\\Postmodular\\PostmodularAccessibleUI.exe",
-            nullptr, nullptr, SW_SHOWNORMAL);
+            L"--vst-mode", nullptr, SW_SHOWNORMAL);
         if (result > 32)
             d_stdout("PostmodularAccessibleUI launched");
         else
