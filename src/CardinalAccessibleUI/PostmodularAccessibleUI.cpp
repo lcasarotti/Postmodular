@@ -484,8 +484,23 @@ private:
 
 struct ModuleInfo {
     int64_t id;
-    std::string plugin, model, displayName;
+    std::string plugin, model, displayName, label;
 };
+
+// Computes label for each module. Duplicates get " #1", " #2" ... suffix so
+// NVDA does not suppress identical consecutive list items.
+static void compute_module_labels(std::vector<ModuleInfo>& modules)
+{
+    std::map<std::string, int> count, idx;
+    for (auto& mi : modules)
+        count[mi.displayName + " (" + mi.plugin + ")"]++;
+    for (auto& mi : modules) {
+        std::string base = mi.displayName + " (" + mi.plugin + ")";
+        mi.label = (count[base] > 1)
+            ? base + " #" + std::to_string(++idx[base])
+            : base;
+    }
+}
 
 struct ParamInfo {
     int id;
@@ -736,11 +751,12 @@ public:
             mi.displayName = m.value("name", mi.model);  // server sends "name", not "displayName"
             m_modules.push_back(mi);
         }
+        compute_module_labels(m_modules);
 
         m_mod_list->Freeze();
         m_mod_list->Clear();
         for (auto& mi : m_modules)
-            m_mod_list->Append(wxString::FromUTF8(mi.displayName + " (" + mi.plugin + ")"));
+            m_mod_list->Append(wxString::FromUTF8(mi.label));
         m_mod_list->Thaw();
 
         if (!g_silent_refresh)
@@ -1225,6 +1241,7 @@ private:
                   [](const ModuleInfo& a, const ModuleInfo& b) {
                       return a.displayName < b.displayName;
                   });
+        compute_module_labels(m_modules);
 
         int new_from = 0, new_to = 0;
         for (int i = 0; i < (int)m_modules.size(); ++i) {
@@ -1236,7 +1253,7 @@ private:
             ch->Freeze();
             ch->Clear();
             for (auto& mi : m_modules)
-                ch->Append(wxString::FromUTF8(mi.displayName + " (" + mi.plugin + ")"));
+                ch->Append(wxString::FromUTF8(mi.label));
             if (!m_modules.empty()) ch->SetSelection(sel);
             ch->Thaw();
         };
